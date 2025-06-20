@@ -3,7 +3,47 @@ import os
 from google import genai
 from google.genai import types
 from dotenv import load_dotenv
+from functions.get_file_content import get_file_content
+from functions.get_files_info import get_files_info
+from functions.run_python_file import run_python_file
+from functions.write_file import write_file
 
+def call_function(function_call_part, verbose=False):
+     
+    if verbose:
+        print(f"Calling function: {function_call_part.name}({function_call_part.args})")
+    else:
+        print(f" - Calling function: {function_call_part.name}")
+    
+    mapping = {
+        "get_file_content": get_file_content,
+        "get_files_info": get_files_info,
+        "run_python_file": run_python_file,
+        "write_file": write_file,
+    }
+
+    if function_call_part.name not in mapping:
+        return types.Content(
+            role="tool",
+            parts=[
+                types.Part.from_function_response(
+                    name=function_call_part.name,
+                    response={"error": f"Unknown function: {function_call_part.name}"},
+                )
+            ],
+        )
+    
+    result = mapping[function_call_part.name](working_directory="./calculator", **function_call_part.args)
+
+    return types.Content(
+        role="tool",
+        parts=[
+            types.Part.from_function_response(
+                name=function_call_part.name,
+                response={"result": result},
+            )
+        ],
+    )
 
 def main():
     # Load environment variables
@@ -34,8 +74,14 @@ def main():
         types.Content(role="user", parts=[types.Part(text=user_prompt)]),
     ]
 
-    # Call the generate content function to create an output
-    generate_content(client, messages, verbose)
+    # Call the model 20 times maximum to produce the result we want
+    for i in range(20):
+        new_messages, done, final_text = generate_content(client, messages, verbose)
+        messages.extend(new_messages)  
+        if done:
+            print("Final response:")
+            print(final_text)
+            break
 
 
 def generate_content(client, messages, verbose):
@@ -51,6 +97,8 @@ def generate_content(client, messages, verbose):
         - Write or overwrite files
 
         All paths you provide should be relative to the working directory. You do not need to specify the working directory in your function calls as it is automatically injected for security reasons.
+        
+        After using a tool, always wait for the result before summarizing or planning next steps.
         """
 
     # Declaration of the function schemas for the LLM to understand how to use the provided functions (this does not allow the agent to call the functions yet!)
@@ -122,7 +170,7 @@ def generate_content(client, messages, verbose):
         schema_write_file,
         schema_run_python_file,
     ]
-)
+    )
 
     # Extract the response from the model using the client and message from main
     response = client.models.generate_content(
@@ -137,12 +185,35 @@ def generate_content(client, messages, verbose):
         response_tokens = response.usage_metadata.candidates_token_count
         print(f"Prompt tokens: {prompt_tokens}\nResponse tokens: {response_tokens}")
 
+    new_messages = [] # Gather new_messages as a list to return
+    for candidate in response.candidates:
+        new_messages.append(candidate.content)
+
     if response.function_calls:
         for function_call in response.function_calls:
-            print(f"Calling function: {function_call.name}({function_call.args})")
+            func_response = call_function(function_call, verbose)
+            if not hasattr(func_response, "parts"):
+                raise Exception("Missing .parts")
+            if not isinstance(func_response.parts, list):
+                raise Exception(".parts not a list")
+            if not len(func_response.parts) > 0:
+                raise Exception(".parts is empty")
+            if not hasattr(func_response.parts[0], "function_response"):
+                raise Exception("Missing .function_response")
+            if not hasattr(func_response.parts[0].function_response, "response"):
+                raise Exception("Missing .response")
+            if verbose:
+                print(f"-> {func_response.parts[0].function_response.response}")
+            tool_content = types.Content(
+                role="tool",
+                parts=[types.Part(function_response=func_response.parts[0].function_response)]
+            )
+            new_messages.append(tool_content)
+        return new_messages, False, None
+            
     else:
-        print("Response:")
-        print(response.text)
+        # No function call, done!
+        return new_messages, True, response.text
 
-if __name__ == "__main__":
+if __name__ == "__main__": 
     main()
