@@ -3,3 +3,6 @@ venv/
 
 # Secrets
 .env
+
+# Pycache
+__pycache__/
